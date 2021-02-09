@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"sort"
 	"time"
+  "sync"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -15,7 +16,7 @@ import (
 // They can be read,write,list,delete or a stopper
 type WorkItem interface {
 	Prepare() error
-	Do() error
+	Do(writeBuffer *sync.Pool) error
 	Clean() error
 }
 
@@ -132,7 +133,7 @@ func (op Stopper) Prepare() error {
 }
 
 // Do executes the actual work of the ReadOperation
-func (op ReadOperation) Do() error {
+func (op ReadOperation) Do(writeBufferPool *sync.Pool) error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).WithField("Preexisting?", op.WorksOnPreexistingObject).Debug("Doing ReadOperation")
 	start := time.Now()
 	err := getObject(svc, op.ObjectName, op.Bucket, op.ObjectSize)
@@ -148,11 +149,17 @@ func (op ReadOperation) Do() error {
 }
 
 // Do executes the actual work of the WriteOperation
-func (op WriteOperation) Do() error {
+func (op WriteOperation) Do(writeBufferPool *sync.Pool) error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Doing WriteOperation")
+  data := writeBufferPool.Get().(*WriteBuffer)
 	start := time.Now()
-	err := putObject(svc, op.ObjectName, bytes.NewReader(generateRandomBytes(op.ObjectSize)), op.Bucket)
+	err := putObject(svc, op.ObjectName, data.reader , op.Bucket)
 	duration := time.Since(start)
+  if data.tag == "new" {
+    data.tag = "used"
+    log.Debug("new buffer is used")
+  }
+  writeBufferPool.Put(data)
 	promLatency.WithLabelValues(op.TestName, "PUT").Observe(float64(duration.Milliseconds()))
 	if err != nil {
 		promFailedOps.WithLabelValues(op.TestName, "PUT").Inc()
@@ -164,7 +171,7 @@ func (op WriteOperation) Do() error {
 }
 
 // Do executes the actual work of the ListOperation
-func (op ListOperation) Do() error {
+func (op ListOperation) Do(writeBufferPool *sync.Pool) error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Doing ListOperation")
 	start := time.Now()
 	_, err := listObjects(svc, op.ObjectName, op.Bucket)
@@ -179,7 +186,7 @@ func (op ListOperation) Do() error {
 }
 
 // Do executes the actual work of the DeleteOperation
-func (op DeleteOperation) Do() error {
+func (op DeleteOperation) Do(writeBufferPool *sync.Pool) error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Doing DeleteOperation")
 	start := time.Now()
 	err := deleteObject(svc, op.ObjectName, op.Bucket)
@@ -194,7 +201,7 @@ func (op DeleteOperation) Do() error {
 }
 
 // Do does nothing here
-func (op Stopper) Do() error {
+func (op Stopper) Do(writeBuffer *sync.Pool) error {
 	return nil
 }
 
@@ -229,7 +236,7 @@ func (op Stopper) Clean() error {
 
 // DoWork processes the workitems in the workChannel until
 // either the time runs out or a stopper is found
-func DoWork(workChannel chan WorkItem, doneChannel chan bool) {
+func DoWork(workChannel chan WorkItem, doneChannel chan bool, writeBufferPool *sync.Pool) {
 	for {
 		select {
 		case <-workContext.Done():
@@ -243,7 +250,7 @@ func DoWork(workChannel chan WorkItem, doneChannel chan bool) {
 				doneChannel <- true
 				return
 			}
-			err := work.Do()
+			err := work.Do(writeBufferPool)
 			if err != nil {
 				log.WithError(err).Error("Issues when performing work - ignoring")
 			}
@@ -261,3 +268,4 @@ func generateRandomBytes(size uint64) []byte {
 	log.Tracef("Generated %d random bytes in %v", n, time.Since(now))
 	return random
 }
+
