@@ -11,7 +11,6 @@ import (
 	"os"
 	"time"
   "runtime"
-  "sync"
   "bytes"
 
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -120,34 +119,26 @@ func connectToServer(serverAddress string) error {
 	}
 }
 
-type WriteBuffer struct {
-  tag string
-  buffer []byte
-  reader *bytes.Reader
-}
-
-
 // PerfTest runs a performance test as configured in testConfig
 func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, workerID string) time.Duration {
 	workChannel := make(chan WorkItem, len(*Workqueue.Queue))
 	doneChannel := make(chan bool)
-  writeBufferPool := sync.Pool{
-    New: func() interface{} {
-      data := new(WriteBuffer)
-      data.tag = "new"
-      data.buffer = make([]byte, testConfig.Objects.SizeMax)
-      rand.Read(data.buffer)
-      data.reader = bytes.NewReader(data.buffer)
-      return data
-    },
-  }
-
+  writeBufferPool := make(chan *WriteBuffer, testConfig.ParallelClients)
+  
+  for i:= 0; i < cap(writeBufferPool); i++ {
+   data := new(WriteBuffer)
+    data.tag = "new"
+    data.buffer = make([]byte, testConfig.Objects.SizeMax)
+    rand.Read(data.buffer)
+    data.reader = bytes.NewReader(data.buffer)
+    writeBufferPool <- data
+ }
 
 	startTime := time.Now().UTC()
 	promTestStart.WithLabelValues(testConfig.Name).Set(float64(startTime.UnixNano() / int64(1000000)))
 	// promTestGauge.WithLabelValues(testConfig.Name).Inc()
 	for worker := 0; worker < testConfig.ParallelClients; worker++ {
-		go DoWork(workChannel, doneChannel, &writeBufferPool)
+		go DoWork(workChannel, doneChannel, writeBufferPool)
 	}
 	log.Infof("Started %d parallel clients", testConfig.ParallelClients)
 	if testConfig.Runtime != 0 {
