@@ -123,7 +123,7 @@ func connectToServer(serverAddress string) error {
 func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, workerID string) time.Duration {
 	workChannel := make(chan WorkItem, len(*Workqueue.Queue))
 	doneChannel := make(chan bool)
-  writeBufferPool := make(chan *WriteBuffer, testConfig.ParallelClients)
+  writeBufferPool := make(chan *WriteBuffer, 2*testConfig.ParallelClients)
   
   for i:= 0; i < cap(writeBufferPool); i++ {
    data := new(WriteBuffer)
